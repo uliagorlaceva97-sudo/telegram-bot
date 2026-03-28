@@ -1,0 +1,195 @@
+import asyncio
+import logging
+import os
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
+import uvicorn
+from fastapi import FastAPI
+from threading import Thread
+
+# --- КОНФИГУРАЦИЯ ---
+BOT_TOKEN = os.getenv('BOT_TOKEN')  # Теперь токен берется из переменных окружения Railway
+ADMIN_ID = int(os.getenv('ADMIN_ID', 0))  # ID админа тоже из переменных
+# -------------------
+
+# Проверка наличия токена
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в переменных окружения!")
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+
+# --- КНОПКИ (Клавиатуры) ---
+main_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Пример готового бота")],
+        [KeyboardButton(text="Заказать бота")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
+
+example_inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✅ Да, заказать", callback_data="order_start")],
+    [InlineKeyboardButton(text="❌ Нет, не нужно", callback_data="cancel_example")]
+])
+
+confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="✅ Все верно", callback_data="confirm_yes")],
+    [InlineKeyboardButton(text="✏️ Есть ошибка", callback_data="confirm_no")]
+])
+
+# --- FSM (Машина состояний) ---
+class OrderForm(StatesGroup):
+    waiting_for_business = State()
+    waiting_for_tasks = State()
+    waiting_for_budget = State()
+    waiting_for_name = State()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+async def notify_admin(data: dict):
+    if ADMIN_ID:
+        message_text = (
+            f"🆕 <b>НОВЫЙ ЗАКАЗ!</b>\n\n"
+            f"👤 <b>Имя:</b> {data['name']}\n"
+            f"💼 <b>Бизнес:</b> {data['business']}\n"
+            f"📝 <b>Задачи:</b> {data['tasks']}\n"
+            f"💰 <b>Бюджет:</b> {data['budget']}"
+        )
+        await bot.send_message(ADMIN_ID, message_text, parse_mode="HTML")
+
+# --- ОБРАБОТЧИКИ КОМАНД ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "Здравствуй! В этом чате вы сможете заказать бота под ключ для интересующей ниши: услуги маникюра, кодитера, стоматолога, онлайн-школы и тд.",
+        reply_markup=main_kb
+    )
+
+@dp.message(F.text == "Пример готового бота")
+async def example_bot(message: types.Message):
+    await message.answer("Вот пример нашего бота: @testssssmanik_bot")
+    await asyncio.sleep(1)
+    
+    advantages_text = (
+        "✨ <b>Почему этот бот — идеальное решение для бизнеса?</b> ✨\n\n"
+        "✅ <b>Автоматизация 24/7:</b> Клиенты записываются сами, даже когда вы спите.\n"
+        "✅ <b>Красивый дизайн:</b> Стильное меню и понятная навигация.\n"
+        "✅ <b>Умные напоминания:</b> Бот автоматически напоминает клиентам о записи.\n"
+        "✅ <b>Готовый функционал:</b> Онлайн-запись, оплата, сбор отзывов.\n"
+        "✅ <b>Экономия времени:</b> Вы перестанете тратить часы на ответы."
+    )
+    await message.answer(advantages_text, parse_mode="HTML")
+    await message.answer(
+        "Вам понравился тестовый бот? Желаете заказать собственного?",
+        reply_markup=example_inline_kb
+    )
+
+@dp.message(F.text == "Заказать бота")
+async def start_order(message: types.Message, state: FSMContext):
+    await message.answer("Отлично! Давайте создадим бота для вашего бизнеса. Ответьте на пару вопросов:")
+    await message.answer("Для какого бизнеса нужен бот?")
+    await state.set_state(OrderForm.waiting_for_business)
+
+@dp.callback_query(F.data == "order_start")
+async def callback_order_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    await start_order(callback.message, state)
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_example")
+async def callback_cancel_example(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await callback.message.answer("Хорошо! Если передумаете, дайте знать.", reply_markup=main_kb)
+    await callback.answer()
+
+@dp.message(OrderForm.waiting_for_business)
+async def process_business(message: types.Message, state: FSMContext):
+    await state.update_data(business=message.text)
+    await message.answer("Какие основные задачи он должен выполнять? (например, сбор заявок, рассылка, онлайн-оплата и тд)")
+    await state.set_state(OrderForm.waiting_for_tasks)
+
+@dp.message(OrderForm.waiting_for_tasks)
+async def process_tasks(message: types.Message, state: FSMContext):
+    await state.update_data(tasks=message.text)
+    await message.answer("Какой бюджет рассматриваете?")
+    await state.set_state(OrderForm.waiting_for_budget)
+
+@dp.message(OrderForm.waiting_for_budget)
+async def process_budget(message: types.Message, state: FSMContext):
+    await state.update_data(budget=message.text)
+    await message.answer("Отлично! Как вас зовут?")
+    await state.set_state(OrderForm.waiting_for_name)
+
+@dp.message(OrderForm.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    data = await state.get_data()
+    
+    summary = (
+        f"Спасибо! Ваши данные:\n\n"
+        f"👤 Имя: {data['name']}\n"
+        f"💼 Бизнес: {data['business']}\n"
+        f"📝 Задачи: {data['tasks']}\n"
+        f"💰 Бюджет: {data['budget']}"
+    )
+    await message.answer(summary, reply_markup=confirm_kb)
+
+@dp.callback_query(F.data == "confirm_yes")
+async def confirm_yes(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await callback.message.edit_text("✅ Ваша заявка принята. В ближайшее время свяжусь с вами.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await notify_admin(data)
+    await state.clear()
+    await callback.message.answer("Вернуться в главное меню можно по команде /start", reply_markup=main_kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_no")
+async def confirm_no(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    await callback.message.answer("Давайте исправим. Пожалуйста, введите данные заново.")
+    await callback.message.answer("Для какого бизнеса нужен бот?")
+    await state.set_state(OrderForm.waiting_for_business)
+    await callback.answer()
+
+@dp.message()
+async def fallback_handler(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Используйте кнопки ниже для навигации.", reply_markup=main_kb)
+
+# --- FastAPI для Railway (чтобы бот не падал) ---
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Bot is running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
+# --- Функция для запуска бота в фоне ---
+async def start_bot():
+    await dp.start_polling(bot)
+
+def run_bot():
+    asyncio.run(start_bot())
+
+# --- Точка входа для Railway ---
+if __name__ == "__main__":
+    # Запускаем бота в отдельном потоке
+    bot_thread = Thread(target=run_bot)
+    bot_thread.start()
+    # Запускаем FastAPI сервер
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
